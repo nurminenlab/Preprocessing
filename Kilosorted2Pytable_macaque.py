@@ -2,7 +2,7 @@ import numpy as np
 import tables as tb
 import pandas as pd
 import sys
-sys.path.append('/home/lauri/code/DataPreprocess/')
+sys.path.append('/home/lauri/code/Preprocessing/')
 import datapreprocesslib as prepro
 
 results_root = '/home/lauri/projects/CorrelatedVariability/results/'
