@@ -64,3 +64,7 @@ trialsDF = trialstartDF.join(trialstopDF)
 
 stimstartDF = pd.read_csv(stimstartFullPath.absolute(),sep=" ",header=None)
 stimstartDF.columns = ['stimstart']
+
+# save the dataframes
+trialsDF.to_csv(trialstartFullPath.with_suffix('.csv'),index=False)
+stimstartDF.to_csv(stimstartFullPath.with_suffix('.csv'),index=False)
