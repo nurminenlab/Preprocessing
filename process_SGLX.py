@@ -2,6 +2,8 @@ from lib import readSGLX
 from utils import utils
 import numpy as np
 import subprocess 
+import pandas as pd
+from time import sleep
 
 CatGT_dir  = ' C:/Users/lonurmin/Desktop/code/CatGT-win'
 TPrime_dir = ' C:/Users/lonurmin/Desktop/code/TPrime-win'
@@ -12,11 +14,25 @@ RUN = ' -run=RF-mapping-wedge'
 prs = ' -g=0 -t=0 -ap -ni -prb_fld -prb=0'
 xa2 = ' -xa=0,0,2,2.5,1,0' # trial start
 xia = ' -xia=0,0,2,2.5,3.5,0' # trial stop
-xa  = ' -xa=0,0,4,2.5,1,25' # stim start
+xa  = ' -xa=0,0,4,2.5,1,0' # stim start
+
+# run CatGT
+print('CatGT is running, please wait for the process to finish')
+subprocess.run('cd '+CatGT_dir, shell=True)
+subprocess.run('CatGT'+DIR+RUN+prs+xia+xa+xa2, shell=True)
+
+# convert spike times to seconds
+binFullPath = utils.getFilePath(windowTitle="Select binary ap file")
+spikesFullPath = utils.getFilePath(windowTitle="Select spikes file")
+meta = readSGLX.readMeta(binFullPath)
+sRate = readSGLX.SampRate(meta)
+spike_times_smp = np.load(spikesFullPath)
+spike_times_sec = np.around(np.divide(spike_times_smp,sRate,dtype=float),decimals=6)
+np.save(spikesFullPath.with_stem('spike_times_sec'),spike_times_sec)
 
 # TPrime parameters
-tostream = utils.getFilePath(windowTitle="SYNC tostream file (IMEC0)")
-fromstream = utils.getFilePath(windowTitle="SYNC fromstream file (usually NIDAQ)")
+tostream = utils.getFilePath(windowTitle="SYNC tostream file (IMEC0 edgefile.txt)")
+fromstream = utils.getFilePath(windowTitle="SYNC fromstream file (usually NIDAQ edgefile.txt)")
 trialstart = utils.getFilePath(windowTitle="SYNC trial start (usually xa2)")
 trialstop  = utils.getFilePath(windowTitle="SYNC trial stop (usually xia2)")
 stimstart  = utils.getFilePath(windowTitle="SYNC stimulus (usually xa4)")
@@ -28,20 +44,23 @@ trialstart = ' -events=1,'+str(trialstart)+','+str(trialstart)[0:len(str(trialst
 trialstop = ' -events=1,'+str(trialstop)+','+str(trialstop)[0:len(str(trialstop))-len(str(trialstop.stem)+'.txt')]+'trialstop.txt'
 stimstart = ' -events=1,'+str(stimstart)+','+str(stimstart)[0:len(str(stimstart))-len(str(stimstart.stem)+'.txt')]+'stimstart.txt'
 
-# run CatGT
-subprocess.run('cd '+CatGT_dir, shell=True)
-subprocess.run('CatGT'+DIR+RUN+prs+xia+xa+xa2, shell=True)
-
-binFullPath = utils.getFilePath(windowTitle="Select binary file")
-spikesFullPath = utils.getFilePath(windowTitle="Select spikes file")
-
-# convert spike times to seconds
-meta = readSGLX.readMeta(binFullPath)
-sRate = readSGLX.SampRate(meta)
-spike_times_smp = np.load(spikesFullPath)
-spike_times_sec = np.around(np.divide(spike_times_smp,sRate,dtype=float),decimals=6)
-np.save(spikesFullPath.with_stem('spike_times_sec'),spike_times_sec)
-
 # run TPrime 
 subprocess.run('cd '+TPrime_dir, shell=True)
-subprocess.run('TPrime'+syncperiod+tostream+fromstream+trialstart+trialstop+stimstart, shell=True)
+subprocess.run('TPrime'+syncperiod+tostream+fromstream+trialstart+trialstop+stimstart, shell=True) 
+
+# get paths to the pulse files 
+trialstartFullPath = utils.getFilePath(windowTitle="Select trialstart file")
+trialstopFullPath = utils.getFilePath(windowTitle="Select trialstop file")
+stimstartFullPath = utils.getFilePath(windowTitle="Select stimstart file")
+
+# read the pulse files and convert to dataframe
+trialstartDF = pd.read_csv(trialstartFullPath.absolute(),sep=" ",header=None)
+trialstartDF.columns = ['trialstart']
+
+trialstopDF = pd.read_csv(trialstopFullPath.absolute(),sep=" ",header=None)
+trialstopDF.columns = ['trialstop']
+
+trialsDF = trialstartDF.join(trialstopDF)
+
+stimstartDF = pd.read_csv(stimstartFullPath.absolute(),sep=" ",header=None)
+stimstartDF.columns = ['stimstart']
