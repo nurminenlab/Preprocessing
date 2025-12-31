@@ -9,9 +9,9 @@ CatGT_dir  = ' C:/Users/lonurmin/Desktop/code/CatGT-win'
 TPrime_dir = ' C:/Users/lonurmin/Desktop/code/TPrime-win'
 
 # catGT parameters
-DIR = ' -dir=C:\\localDATA\\Electrophysiology\\MM001-Sansa\\2024-07-03'
+DIR = ' -dir=F:\\localDATA\\Electrophysiology\\MM005-Desta\\2025-12-08'
 RUN = ' -run=BSD'
-prs = ' -g=1 -t=0 -ap -ni -prb_fld -prb=0'
+prs = ' -g=0 -t=0 -ap -ni -prb_fld -prb=0'
 trialstart = ' -xa=0,0,3,2.5,1,0' # trial start
 trialstop = ' -xia=0,0,3,2.5,3.5,0' # trial stop
 fixstart = ' -xa=0,0,4,2.5,1,0' # fix start
@@ -36,7 +36,7 @@ spike_times_sec = np.around(np.divide(spike_times_smp,sRate,dtype=float),decimal
 np.save(spikesFullPath.with_stem('spike_times_sec'),spike_times_sec)
 
 # TPrime parameters
-tostream = utils.getFilePath(windowTitle="SYNC tostream file (IMEC0 edgefile.txt)",filetypes=[("CatGT output","*xd_384_6_500.txt")])
+tostream = utils.getFilePath(windowTitle="SYNC tostream file (IMEC0 edgefile.txt)",filetypes=[("CatGT output","*xd_*")])
 fromstream = utils.getFilePath(windowTitle="SYNC fromstream file (usually NIDAQ edgefile.txt)",filetypes=[("CatGT output","*xa_6_500.txt")])
 trialstart = utils.getFilePath(windowTitle="SYNC trial start (usually xa3)",filetypes=[("CatGT output","*xa_3_0.txt")])
 trialstop  = utils.getFilePath(windowTitle="SYNC trial stop (usually xia3)",filetypes=[("CatGT output","*xia_3_0.txt")])

@@ -1,17 +1,16 @@
-
 from lib import readSGLX
 from utils import utils
 import numpy as np
 import subprocess 
 import pandas as pd
-from time import sleep
+#from time import sleep
 
 CatGT_dir  = ' C:/Users/lonurmin/Desktop/code/CatGT-win'
 TPrime_dir = ' C:/Users/lonurmin/Desktop/code/TPrime-win'
 
 # catGT parameters
-DIR = ' -dir=C:\\localDATA\\Electrophysiology\\MM001-Sansa\\2024-05-23'
-RUN = ' -run=BSD'
+DIR = ' -dir=C:\\localDATA\\Electrophysiology\\MM004-Wolfjaw\\2024-12-19'
+RUN = ' -run=RF-mapping'
 prs = ' -g=0 -t=0 -ap -ni -prb_fld -prb=0'
 trialstart = ' -xa=0,0,3,2.5,1,0' # trial start
 trialstop = ' -xia=0,0,3,2.5,3.5,0' # trial stop
