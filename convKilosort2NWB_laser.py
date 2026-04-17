@@ -56,13 +56,13 @@ def parse_date_string(date_str: str) -> date:
 
 
 # ============== CONFIGURATION ==============
-MONKEY_NAME = "MM004-Wolfjaw"
-DATE = "2025-11-12"
+MONKEY_NAME = "MM005-Desta"
+DATE = "2026-03-24"
 BD   = "2021-04-23"
-SEX  = "M"
-SESSION_NAME = "ori_contrast_Lipshutz"
-GATE = "g2"
-PROJECT = "Adaptation-to-image-statistics-in-primate-V1"
+SEX  = "F"
+SESSION_NAME = "BSD"
+GATE = "g0"
+PROJECT = "Inhibition-neural-information-processing"
 file_name = DATE + "-" + MONKEY_NAME + "-" + PROJECT+".nwb"
 
 recording_date = parse_date_string(DATE)
@@ -208,6 +208,85 @@ def get_dtype_from_meta(meta_path):
         return type_map.get(int(type_code), 'int16')
     # Default to int16 as SpikeGLX always saves raw data as int16
     return 'int16'
+
+
+def get_uv_per_bit(meta_path):
+    """
+    Get the conversion factor from raw int16 values to microvolts for AP data.
+    
+    For Neuropixels probes, the formula is:
+        voltage (uV) = raw_value * Vmax / (maxInt * AP_gain) * 1e6
+    
+    Parameters:
+    -----------
+    meta_path : str or Path
+        Path to the .ap.meta file
+        
+    Returns:
+    --------
+    uv_per_bit : float
+        Conversion factor: multiply raw int16 values by this to get microvolts
+    """
+    meta = parse_spikeglx_meta(meta_path)
+    
+    # Get voltage range
+    Vmax = float(meta.get('imAiRangeMax', 0.6))
+    
+    # Determine maxInt from probe type
+    # NP 1.0 (type 0): 10-bit ADC -> maxInt = 512
+    # NP 2.0 (type 21, 24): 14-bit ADC -> maxInt = 8192
+    prb_type = int(meta.get('imDatPrb_type', 0))
+    if prb_type in [21, 24, 2013, 2014]:
+        maxInt = 8192
+    else:
+        maxInt = 512  # NP 1.0 default
+    
+    # Get AP gain from imroTbl
+    # Format: (probe_type,num_channels)(chan bank refid apgain lfgain)...
+    imro_str = meta.get('imroTbl', '')
+    entries = imro_str.split(')')
+    ap_gain = 500  # default
+    if len(entries) > 1:
+        first_channel = entries[1].strip().lstrip('(')
+        parts = first_channel.split()
+        if len(parts) >= 4:
+            ap_gain = float(parts[3])
+    
+    uv_per_bit = (Vmax / (maxInt * ap_gain)) * 1e6
+    return uv_per_bit
+
+
+def get_last_analog_channel_index(nidaq_meta_path):
+    """
+    Get the index of the last analog channel from the NIDAQ meta file.
+    
+    Parses the 'acqMnMaXaDw' field which gives counts of:
+    MN (multiplexed neural), MA (multiplexed aux), XA (extra analog), DW (digital word).
+    The last analog channel index = MN + MA + XA - 1.
+    
+    Parameters:
+    -----------
+    nidaq_meta_path : str or Path
+        Path to the .nidq.meta file
+        
+    Returns:
+    --------
+    int
+        Zero-based index of the last analog channel
+    """
+    meta = parse_spikeglx_meta(nidaq_meta_path)
+    acq_str = meta.get('acqMnMaXaDw', '')
+    if acq_str:
+        parts = acq_str.split(',')
+        mn = int(parts[0])
+        ma = int(parts[1])
+        xa = int(parts[2])
+        total_analog = mn + ma + xa
+        return total_analog - 1
+    else:
+        # Fallback: assume last saved channel is digital, second-to-last is last analog
+        n_saved = int(meta.get('nSavedChans', 8))
+        return n_saved - 2
 
 
 def get_session_start_time_from_meta(meta_path):
@@ -522,7 +601,7 @@ def expt_info_to_metadata(expt_info):
                        if not attr.startswith('_') and not callable(getattr(expt_info, attr))]
     
     for field_name in field_names:
-        if field_name == 'trial_records':
+        if field_name == 'trial_records': # processed elsewhere
             continue
         
         try:
@@ -708,9 +787,10 @@ spike_times_all = np.load(Path(folder_path) / "spike_times.npy").flatten()
 spike_clusters_all = np.load(Path(folder_path) / "spike_clusters.npy").flatten()
 
 # Load the raw SpikeGLX data
-print(f"Loading SpikeGLX binary data from: {spikeglx_bin_path}")
 raw_data = load_spikeglx_binary(spikeglx_bin_path, num_channels, sampling_rate, dtype)
 
+# Get microvolts-per-bit conversion factor for waveform scaling
+uv_per_bit = get_uv_per_bit(spikeglx_meta_path)
 
 # Open the NWB file and add the additional columns
 with NWBHDF5IO(nwbfile_path, 'r+') as io:
@@ -759,6 +839,11 @@ with NWBHDF5IO(nwbfile_path, 'r+') as io:
             ap_type = 'unknown'
             trough_to_peak_ms = 0.0
         
+        # Scale waveforms from raw int16 to microvolts
+        mean_wf = mean_wf * uv_per_bit
+        std_wf = std_wf * uv_per_bit
+        sample_wf = sample_wf * uv_per_bit
+        
         snrs.append(snr)
         mean_waveforms.append(mean_wf)
         std_waveforms.append(std_wf)
@@ -781,13 +866,13 @@ with NWBHDF5IO(nwbfile_path, 'r+') as io:
     
     nwbfile.units.add_column(
         name='waveform_mean',
-        description='Mean waveform of the unit',
+        description='Mean waveform of the unit (microvolts)',
         data=mean_waveforms
     )
     
     nwbfile.units.add_column(
         name='waveform_std',
-        description='Standard deviation of the waveform across all spikes',
+        description='Standard deviation of the waveform across all spikes (microvolts)',
         data=std_waveforms
     )
     
@@ -813,7 +898,7 @@ print("\nProcessing NIDAQ data for trial extraction...")
 nidaq_sampling_rate = get_sampling_rate_from_meta(NIDAQ_meta_path)
 
 # Load NIDAQ binary data
-nidaq_num_channels = 8
+nidaq_num_channels = get_num_channels_from_meta(NIDAQ_meta_path)
 nidaq_data = load_nidaq_binary(NIDAQ_bin_path, num_channels=nidaq_num_channels)
 
 
@@ -823,6 +908,10 @@ expt_info = mat_data['expt_info']
 # Get TTL signals
 fixation_ttl = nidaq_data[:, 4]  # Channel 4: fixation maintained
 stim_onset_ttl = nidaq_data[:, 5]  # Channel 5: stimulus onset
+
+# Get laser TTL from last analog channel
+laser_ch = 7
+laser_ttl = nidaq_data[:, laser_ch]                  
     
 # Detect stimulus onsets
 stim_onsets = detect_ttl_onsets(stim_onset_ttl,threshold=15000)
@@ -830,27 +919,37 @@ stim_onsets = detect_ttl_onsets(stim_onset_ttl,threshold=15000)
 # Detect fixation breaks (falling edges on channel 4)
 fixation_offsets = detect_ttl_offsets(fixation_ttl,threshold=15000)
 
+# Detect laser onsets
+laser_onsets = detect_ttl_onsets(laser_ttl, threshold=15000)
+
 # remove trials that in which stimulus onset is less than 500 ms from the end of the trial fixstop
 short_stim_inds = []
 stim_onsets_sec = stim_onsets / nidaq_sampling_rate
 fixation_offsets_sec = fixation_offsets / nidaq_sampling_rate
+laser_onsets_sec = laser_onsets / nidaq_sampling_rate
 for i,val in enumerate(stim_onsets_sec):
     fixstop_tmp = fixation_offsets >= val
     if np.min(np.abs(fixstop_tmp - val)) < expt_info.image_duration:
         short_stim_inds.append(i)
 
+# in a loop check if the laser was on 
+laser_on = []
+for st_on in stim_onsets_sec:
+    if np.any(np.abs(laser_onsets_sec - st_on) < 0.1):
+        laser_on.append(True)
+    else:
+        laser_on.append(False)
+
 # create table of trials with orientation and ENV
-orientations, ENVS = linear_stimuli(expt_info,stim_type='orientation_ENV')
-ENVS = ENVS[~np.isnan(orientations)]
-orientations = orientations[~np.isnan(orientations)] # remove nans
-orientations = expt_info.orientations[orientations.astype(int)-1] # map to actual orientation values
+natural_images, ENVS = linear_stimuli(expt_info,stim_type='image')
+natural_images = natural_images[~np.isnan(natural_images)]
 
 # trials DF must have start_time and stop_time columns all the other columns will be added as custom columns
 trials = pd.DataFrame({
     'start_time': stim_onsets_sec,
     'stop_time': stim_onsets_sec + expt_info.image_duration,
-    'orientation': orientations,
-    'env': ENVS,
+    'natural_images': natural_images,    
+    'laser_on': laser_on,
 })
 
 with NWBHDF5IO(nwbfile_path, 'r+') as io:
@@ -858,8 +957,6 @@ with NWBHDF5IO(nwbfile_path, 'r+') as io:
     # Add trials to NWB file
     dataframe_to_nwb_trials(nwbfile, trials)
     io.write(nwbfile)    
-
-
     
 # Convert expt_info to metadata dictionary (excluding trial_records)
 expt_metadata = expt_info_to_metadata(expt_info)
