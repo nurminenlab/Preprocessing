@@ -54,28 +54,6 @@ def parse_date_string(date_str: str) -> date:
     return date(year, month, day)
 
 
-
-# ============== CONFIGURATION ==============
-MONKEY_NAME = "MM005-Desta"
-DATE = "2026-03-24"
-BD   = "2021-04-23"
-SEX  = "F"
-SESSION_NAME = "BSD"
-GATE = "g0"
-PROJECT = "Inhibition-neural-information-processing"
-file_name = DATE + "-" + MONKEY_NAME + "-" + PROJECT+".nwb"
-
-recording_date = parse_date_string(DATE)
-birthday = parse_date_string(BD)
-age_days = calculate_age_days(birthday, recording_date)
-
-subject_info = dict(subject_id=MONKEY_NAME, 
-                    species="Callithrix jacchus", 
-                    sex=SEX,
-                    age=f"P{age_days}D")
-# ============== END CONFIGURATION ==============
-
-
 def dataframe_to_nwb_trials(nwbfile, df):
     """
     Add trials from a pandas DataFrame to an NWB file's trials table.
@@ -735,258 +713,312 @@ def get_unit_channels(kilosort_folder):
 
 
 
-# Kilosort output folder
-folder_path = f"F:/localDATA/Electrophysiology/{MONKEY_NAME}/{DATE}/{SESSION_NAME}_{GATE}/{SESSION_NAME}_{GATE}_imec0/kilosort4/"
+def convert_session(
+    monkey_name: str,
+    date_str: str,
+    birthday_str: str,
+    sex: str,
+    session_name: str = "BSD",
+    gate: str = "g0",
+    project: str = "Inhibition-neural-information-processing",
+    data_root: str = "F:/localDATA/Electrophysiology",
+    output_dir: str = None,
+    species: str = "Callithrix jacchus",
+    pre_samples: int = 30,
+    post_samples: int = 60,
+    max_sample_waveforms: int = 200,
+    overwrite: bool = False,
+) -> Path:
+    """
+    Run the full Kilosort -> NWB conversion for a single session.
 
-# Path to SpikeGLX .ap.bin file (update this path)
-spikeglx_bin_path = f"F:/localDATA/Electrophysiology/{MONKEY_NAME}/{DATE}/{SESSION_NAME}_{GATE}/{SESSION_NAME}_{GATE}_imec0/" \
-f"{SESSION_NAME}_{GATE}_t0.imec0.ap.bin"
-# Path to SpikeGLX .ap.meta file (update this path)
-spikeglx_meta_path = f"F:/localDATA/Electrophysiology/{MONKEY_NAME}/{DATE}/{SESSION_NAME}_{GATE}/{SESSION_NAME}_{GATE}_imec0/" \
-f"{SESSION_NAME}_{GATE}_t0.imec0.ap.meta"
-NIDAQ_bin_path = f"F:/localDATA/Electrophysiology/{MONKEY_NAME}/{DATE}/{SESSION_NAME}_{GATE}/{SESSION_NAME}_{GATE}_t0.nidq.bin"
-NIDAQ_meta_path = f"F:/localDATA/Electrophysiology/{MONKEY_NAME}/{DATE}/{SESSION_NAME}_{GATE}/{SESSION_NAME}_{GATE}_t0.nidq.meta"
+    Parameters
+    ----------
+    monkey_name, date_str, birthday_str, sex
+        Subject identifiers. `date_str` and `birthday_str` must be 'YYYY-MM-DD'.
+    session_name, gate, project
+        SpikeGLX session-name / gate / project identifiers used to construct
+        both the source-data paths and the output file name.
+    data_root
+        Root of the raw Electrophysiology tree.
+    output_dir
+        If given, the .nwb file is written to this folder. Otherwise it is
+        written next to the Kilosort output folder (original behavior).
+    species
+        Latin binomial for the NWB Subject metadata.
+    pre_samples, post_samples, max_sample_waveforms
+        Waveform extraction parameters.
+    overwrite
+        If True and the output file already exists, delete it before running.
+        If False (default), an existing file will cause `run_conversion` to
+        raise.
 
-# Read recording parameters from the .ap.meta file
-num_channels = get_num_channels_from_meta(spikeglx_meta_path)
-dtype = 'int16'  # SpikeGLX always saves raw data as int16
-sampling_rate = get_sampling_rate_from_meta(spikeglx_meta_path)
-
-# Waveform extraction parameters
-pre_samples = 30  # Samples before spike peak
-post_samples = 60  # Samples after spike peak
-max_sample_waveforms = 200  # Maximum number of waveforms to save as samples
-
-# ============== CONVERSION ==============
-# Change the folder_path to the location of the data in your system
-interface = KiloSortSortingInterface(folder_path=folder_path, verbose=False)
-
-metadata = interface.get_metadata()
-session_start_time = get_session_start_time_from_meta(spikeglx_meta_path)
-metadata["NWBFile"].update(session_start_time=session_start_time,
-                        institution="University of Houston, College of Optometry",
-                        lab="Neural information processing laboratory / nurminenlab")
-                  
-
-# Add subject information (required for DANDI upload)
-metadata["Subject"] = subject_info
-
-# First, run the basic conversion to create the NWB file
-nwbfile_path = folder_path + file_name
-interface.run_conversion(nwbfile_path=nwbfile_path, metadata=metadata)
-
-# ============== ADD DEPTH, SNR, AND WAVEFORMS ==============
-print("Loading Kilosort data for additional processing...")
-
-# Load unit depths and channels from Kilosort output
-unit_depths = get_unit_depths(folder_path)
-unit_channels = get_unit_channels(folder_path)
-
-# Load spike times from Kilosort
-spike_times_all = np.load(Path(folder_path) / "spike_times.npy").flatten()
-spike_clusters_all = np.load(Path(folder_path) / "spike_clusters.npy").flatten()
-
-# Load the raw SpikeGLX data
-raw_data = load_spikeglx_binary(spikeglx_bin_path, num_channels, sampling_rate, dtype)
-
-# Get microvolts-per-bit conversion factor for waveform scaling
-uv_per_bit = get_uv_per_bit(spikeglx_meta_path)
-
-# Open the NWB file and add the additional columns
-with NWBHDF5IO(nwbfile_path, 'r+') as io:
-    nwbfile = io.read()
-    # Get unit IDs from the units table
-    unit_ids = nwbfile.units.id[:]
-    
-    # Prepare data arrays
-    depths = []
-    snrs = []
-    mean_waveforms = []
-    std_waveforms = []
-    sample_waveforms_list = []
-    ap_types = []
-    trough_to_peak_durations = []
-    
-    for unit_id in unit_ids:        
-        # Get depth
-        depth = unit_depths.get(unit_id, np.nan)
-        depths.append(depth)
-        
-        # Get spike times for this unit (in samples)
-        unit_spike_mask = spike_clusters_all == unit_id
-        unit_spike_times = spike_times_all[unit_spike_mask]
-        
-        # Get best channel for this unit
-        best_channel = unit_channels.get(unit_id, 0)
-        
-        # Extract waveforms and compute SNR
-        if len(unit_spike_times) > 0 and best_channel < num_channels:
-            mean_wf, std_wf, sample_wf, snr, ap_type, trough_to_peak_ms = extract_waveforms(
-                raw_data, 
-                unit_spike_times, 
-                best_channel, 
-                sampling_rate,
-                pre_samples=pre_samples, 
-                post_samples=post_samples,
-                max_waveforms=max_sample_waveforms
-            )
-        else:
-            waveform_length = pre_samples + post_samples
-            mean_wf = np.zeros(waveform_length)
-            std_wf = np.zeros(waveform_length)
-            sample_wf = np.zeros((1, waveform_length))
-            snr = 0.0
-            ap_type = 'unknown'
-            trough_to_peak_ms = 0.0
-        
-        # Scale waveforms from raw int16 to microvolts
-        mean_wf = mean_wf * uv_per_bit
-        std_wf = std_wf * uv_per_bit
-        sample_wf = sample_wf * uv_per_bit
-        
-        snrs.append(snr)
-        mean_waveforms.append(mean_wf)
-        std_waveforms.append(std_wf)
-        sample_waveforms_list.append(sample_wf)
-        ap_types.append(ap_type)
-        trough_to_peak_durations.append(trough_to_peak_ms)
-    
-    # Add new columns to units table
-    nwbfile.units.add_column(
-        name='depth',
-        description='Depth of the unit from the cortical surface (um)',
-        data=depths
-    )
-    
-    nwbfile.units.add_column(
-        name='snr',
-        description='Signal-to-noise ratio of the unit waveform',
-        data=snrs
-    )
-    
-    nwbfile.units.add_column(
-        name='waveform_mean',
-        description='Mean waveform of the unit (microvolts)',
-        data=mean_waveforms
-    )
-    
-    nwbfile.units.add_column(
-        name='waveform_std',
-        description='Standard deviation of the waveform across all spikes (microvolts)',
-        data=std_waveforms
-    )
-    
-    nwbfile.units.add_column(
-        name='ap_type',
-        description='Action potential type classification: somatic (>0.4ms trough-to-peak) or axonal (<=0.4ms)',
-        data=ap_types
-    )
-    
-    nwbfile.units.add_column(
-        name='trough_to_peak_ms',
-        description='Action potential duration from waveform trough to peak (milliseconds)',
-        data=trough_to_peak_durations
-    )
-    
-    # Save the modified file
-    io.write(nwbfile)
-
-# ============== ADD TRIALS FROM NIDAQ DATA ==============
-print("\nProcessing NIDAQ data for trial extraction...")
-
-# Get NIDAQ sampling rate from meta file
-nidaq_sampling_rate = get_sampling_rate_from_meta(NIDAQ_meta_path)
-
-# Load NIDAQ binary data
-nidaq_num_channels = get_num_channels_from_meta(NIDAQ_meta_path)
-nidaq_data = load_nidaq_binary(NIDAQ_bin_path, num_channels=nidaq_num_channels)
-
-
-mat_data = load_experiment_mat_file(NIDAQ_bin_path)
-expt_info = mat_data['expt_info']
-
-# Get TTL signals
-fixation_ttl = nidaq_data[:, 4]  # Channel 4: fixation maintained
-stim_onset_ttl = nidaq_data[:, 5]  # Channel 5: stimulus onset
-
-# Get laser TTL from last analog channel
-laser_ch = 7
-laser_ttl = nidaq_data[:, laser_ch]                  
-    
-# Detect stimulus onsets
-stim_onsets = detect_ttl_onsets(stim_onset_ttl,threshold=15000)
-
-# Detect fixation breaks (falling edges on channel 4)
-fixation_offsets = detect_ttl_offsets(fixation_ttl,threshold=15000)
-
-# Detect laser onsets
-laser_onsets = detect_ttl_onsets(laser_ttl, threshold=15000)
-
-# remove trials that in which stimulus onset is less than 500 ms from the end of the trial fixstop
-short_stim_inds = []
-stim_onsets_sec = stim_onsets / nidaq_sampling_rate
-fixation_offsets_sec = fixation_offsets / nidaq_sampling_rate
-laser_onsets_sec = laser_onsets / nidaq_sampling_rate
-for i,val in enumerate(stim_onsets_sec):
-    fixstop_tmp = fixation_offsets >= val
-    if np.min(np.abs(fixstop_tmp - val)) < expt_info.image_duration:
-        short_stim_inds.append(i)
-
-# in a loop check if the laser was on 
-laser_on = []
-for st_on in stim_onsets_sec:
-    if np.any(np.abs(laser_onsets_sec - st_on) < 0.1):
-        laser_on.append(True)
-    else:
-        laser_on.append(False)
-
-# create table of trials with orientation and ENV
-natural_images, ENVS = linear_stimuli(expt_info,stim_type='image')
-natural_images = natural_images[~np.isnan(natural_images)]
-
-# trials DF must have start_time and stop_time columns all the other columns will be added as custom columns
-trials = pd.DataFrame({
-    'start_time': stim_onsets_sec,
-    'stop_time': stim_onsets_sec + expt_info.image_duration,
-    'natural_images': natural_images,    
-    'laser_on': laser_on,
-})
-
-with NWBHDF5IO(nwbfile_path, 'r+') as io:
-    nwbfile = io.read()
-    # Add trials to NWB file
-    dataframe_to_nwb_trials(nwbfile, trials)
-    io.write(nwbfile)    
-    
-# Convert expt_info to metadata dictionary (excluding trial_records)
-expt_metadata = expt_info_to_metadata(expt_info)
-
-# Open NWB file again to add experiment metadata as a scratch entry.
-# NOTE: assigning to nwbfile.experiment_description on a file opened in 'r+'
-# is silently dropped by pynwb, so we store the JSON-serialized metadata in
-# /scratch instead, which is designed for arbitrary auxiliary data and works
-# correctly in append mode.
-with NWBHDF5IO(nwbfile_path, 'r+') as io:
-    nwbfile = io.read()
-
+    Returns
+    -------
+    Path
+        Full path to the written .nwb file.
+    """
     import json
+
+    file_name = date_str + "-" + monkey_name + "-" + project + ".nwb"
+
+    recording_date = parse_date_string(date_str)
+    birthday = parse_date_string(birthday_str)
+    age_days = calculate_age_days(birthday, recording_date)
+
+    subject_info = dict(
+        subject_id=monkey_name,
+        species=species,
+        sex=sex,
+        age=f"P{age_days}D",
+    )
+
+    # Kilosort output folder
+    folder_path = (
+        f"{data_root}/{monkey_name}/{date_str}/{session_name}_{gate}/"
+        f"{session_name}_{gate}_imec0/kilosort4/"
+    )
+
+    # Paths to SpikeGLX .ap.bin / .ap.meta and NIDAQ .bin / .meta files
+    spikeglx_bin_path = (
+        f"{data_root}/{monkey_name}/{date_str}/{session_name}_{gate}/"
+        f"{session_name}_{gate}_imec0/{session_name}_{gate}_t0.imec0.ap.bin"
+    )
+    spikeglx_meta_path = (
+        f"{data_root}/{monkey_name}/{date_str}/{session_name}_{gate}/"
+        f"{session_name}_{gate}_imec0/{session_name}_{gate}_t0.imec0.ap.meta"
+    )
+    NIDAQ_bin_path = (
+        f"{data_root}/{monkey_name}/{date_str}/{session_name}_{gate}/"
+        f"{session_name}_{gate}_t0.nidq.bin"
+    )
+    NIDAQ_meta_path = (
+        f"{data_root}/{monkey_name}/{date_str}/{session_name}_{gate}/"
+        f"{session_name}_{gate}_t0.nidq.meta"
+    )
+
+    # Read recording parameters from the .ap.meta file
+    num_channels = get_num_channels_from_meta(spikeglx_meta_path)
+    dtype = 'int16'  # SpikeGLX always saves raw data as int16
+    sampling_rate = get_sampling_rate_from_meta(spikeglx_meta_path)
+
+    # ============== CONVERSION ==============
+    interface = KiloSortSortingInterface(folder_path=folder_path, verbose=False)
+
+    metadata = interface.get_metadata()
+    session_start_time = get_session_start_time_from_meta(spikeglx_meta_path)
+    metadata["NWBFile"].update(
+        session_start_time=session_start_time,
+        institution="University of Houston, College of Optometry",
+        lab="Neural information processing laboratory / nurminenlab",
+    )
+
+    # Add subject information (required for DANDI upload)
+    metadata["Subject"] = subject_info
+
+    # Decide where to write the .nwb file
+    if output_dir is not None:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        nwbfile_path = str(Path(output_dir) / file_name)
+    else:
+        nwbfile_path = folder_path + file_name
+
+    if overwrite and Path(nwbfile_path).exists():
+        print(f"Overwrite requested; removing existing file: {nwbfile_path}")
+        Path(nwbfile_path).unlink()
+
+    # First, run the basic conversion to create the NWB file
+    interface.run_conversion(nwbfile_path=nwbfile_path, metadata=metadata)
+
+    # ============== ADD DEPTH, SNR, AND WAVEFORMS ==============
+    print("Loading Kilosort data for additional processing...")
+
+    unit_depths = get_unit_depths(folder_path)
+    unit_channels = get_unit_channels(folder_path)
+
+    spike_times_all = np.load(Path(folder_path) / "spike_times.npy").flatten()
+    spike_clusters_all = np.load(Path(folder_path) / "spike_clusters.npy").flatten()
+
+    raw_data = load_spikeglx_binary(spikeglx_bin_path, num_channels, sampling_rate, dtype)
+
+    uv_per_bit = get_uv_per_bit(spikeglx_meta_path)
+
+    with NWBHDF5IO(nwbfile_path, 'r+') as io:
+        nwbfile = io.read()
+        unit_ids = nwbfile.units.id[:]
+
+        depths = []
+        snrs = []
+        mean_waveforms = []
+        std_waveforms = []
+        sample_waveforms_list = []
+        ap_types = []
+        trough_to_peak_durations = []
+
+        for unit_id in unit_ids:
+            depth = unit_depths.get(unit_id, np.nan)
+            depths.append(depth)
+
+            unit_spike_mask = spike_clusters_all == unit_id
+            unit_spike_times = spike_times_all[unit_spike_mask]
+
+            best_channel = unit_channels.get(unit_id, 0)
+
+            if len(unit_spike_times) > 0 and best_channel < num_channels:
+                mean_wf, std_wf, sample_wf, snr, ap_type, trough_to_peak_ms = extract_waveforms(
+                    raw_data,
+                    unit_spike_times,
+                    best_channel,
+                    sampling_rate,
+                    pre_samples=pre_samples,
+                    post_samples=post_samples,
+                    max_waveforms=max_sample_waveforms,
+                )
+            else:
+                waveform_length = pre_samples + post_samples
+                mean_wf = np.zeros(waveform_length)
+                std_wf = np.zeros(waveform_length)
+                sample_wf = np.zeros((1, waveform_length))
+                snr = 0.0
+                ap_type = 'unknown'
+                trough_to_peak_ms = 0.0
+
+            mean_wf = mean_wf * uv_per_bit
+            std_wf = std_wf * uv_per_bit
+            sample_wf = sample_wf * uv_per_bit
+
+            snrs.append(snr)
+            mean_waveforms.append(mean_wf)
+            std_waveforms.append(std_wf)
+            sample_waveforms_list.append(sample_wf)
+            ap_types.append(ap_type)
+            trough_to_peak_durations.append(trough_to_peak_ms)
+
+        nwbfile.units.add_column(
+            name='depth',
+            description='Depth of the unit from the cortical surface (um)',
+            data=depths,
+        )
+        nwbfile.units.add_column(
+            name='snr',
+            description='Signal-to-noise ratio of the unit waveform',
+            data=snrs,
+        )
+        nwbfile.units.add_column(
+            name='waveform_mean',
+            description='Mean waveform of the unit (microvolts)',
+            data=mean_waveforms,
+        )
+        nwbfile.units.add_column(
+            name='waveform_std',
+            description='Standard deviation of the waveform across all spikes (microvolts)',
+            data=std_waveforms,
+        )
+        nwbfile.units.add_column(
+            name='ap_type',
+            description='Action potential type classification: somatic (>0.4ms trough-to-peak) or axonal (<=0.4ms)',
+            data=ap_types,
+        )
+        nwbfile.units.add_column(
+            name='trough_to_peak_ms',
+            description='Action potential duration from waveform trough to peak (milliseconds)',
+            data=trough_to_peak_durations,
+        )
+
+        io.write(nwbfile)
+
+    # ============== ADD TRIALS FROM NIDAQ DATA ==============
+    print("\nProcessing NIDAQ data for trial extraction...")
+
+    nidaq_sampling_rate = get_sampling_rate_from_meta(NIDAQ_meta_path)
+
+    nidaq_num_channels = get_num_channels_from_meta(NIDAQ_meta_path)
+    nidaq_data = load_nidaq_binary(NIDAQ_bin_path, num_channels=nidaq_num_channels)
+
+    mat_data = load_experiment_mat_file(NIDAQ_bin_path)
+    expt_info = mat_data['expt_info']
+
+    # Get TTL signals
+    fixation_ttl = nidaq_data[:, 4]     # Channel 4: fixation maintained
+    stim_onset_ttl = nidaq_data[:, 5]   # Channel 5: stimulus onset
+
+    laser_ch = 7
+    laser_ttl = nidaq_data[:, laser_ch]
+
+    stim_onsets = detect_ttl_onsets(stim_onset_ttl, threshold=15000)
+    fixation_offsets = detect_ttl_offsets(fixation_ttl, threshold=15000)
+    laser_onsets = detect_ttl_onsets(laser_ttl, threshold=15000)
+
+    # Remove trials in which stimulus onset is less than 500 ms from the end
+    # of the trial (fixstop)
+    short_stim_inds = []
+    stim_onsets_sec = stim_onsets / nidaq_sampling_rate
+    fixation_offsets_sec = fixation_offsets / nidaq_sampling_rate
+    laser_onsets_sec = laser_onsets / nidaq_sampling_rate
+    for i, val in enumerate(stim_onsets_sec):
+        fixstop_tmp = fixation_offsets >= val
+        if np.min(np.abs(fixstop_tmp - val)) < expt_info.image_duration:
+            short_stim_inds.append(i)
+
+    # Check whether the laser was on for each trial
+    laser_on = []
+    for st_on in stim_onsets_sec:
+        if np.any(np.abs(laser_onsets_sec - st_on) < 0.1):
+            laser_on.append(True)
+        else:
+            laser_on.append(False)
+
+    natural_images, ENVS = linear_stimuli(expt_info, stim_type='image')
+    natural_images = natural_images[~np.isnan(natural_images)]
+
+    trials = pd.DataFrame({
+        'start_time': stim_onsets_sec,
+        'stop_time': stim_onsets_sec + expt_info.image_duration,
+        'natural_images': natural_images,
+        'laser_on': laser_on,
+    })
+
+    with NWBHDF5IO(nwbfile_path, 'r+') as io:
+        nwbfile = io.read()
+        dataframe_to_nwb_trials(nwbfile, trials)
+        io.write(nwbfile)
+
+    # Store expt_info as a scratch entry (assigning to
+    # nwbfile.experiment_description on an r+ file is silently dropped).
+    expt_metadata = expt_info_to_metadata(expt_info)
     expt_metadata_str = json.dumps(expt_metadata, indent=2, default=str)
 
-    nwbfile.add_scratch(
-        expt_metadata_str,
-        name='expt_info_json',
-        description='JSON-serialized experiment metadata from the session .mat '
-                    'file (excludes trial_records, which are in the trials table).'
+    with NWBHDF5IO(nwbfile_path, 'r+') as io:
+        nwbfile = io.read()
+        nwbfile.add_scratch(
+            expt_metadata_str,
+            name='expt_info_json',
+            description='JSON-serialized experiment metadata from the session .mat '
+                        'file (excludes trial_records, which are in the trials table).',
+        )
+        io.write(nwbfile)
+
+    print("\nConversion complete!")
+    print(f"NWB file saved to: {nwbfile_path}")
+
+    # Quick verification
+    from pynwb import read_nwb
+    nwbfile = read_nwb(nwbfile_path)
+    print(f"\nNWB file contains:")
+    print(f"  - {len(nwbfile.units)} units")
+    print(f"  - {len(nwbfile.trials)} trials")
+
+    return Path(nwbfile_path)
+
+
+if __name__ == "__main__":
+    # Default single-session invocation (original hardcoded configuration).
+    convert_session(
+        monkey_name="MM005-Desta",
+        date_str="2026-03-24",
+        birthday_str="2021-04-23",
+        sex="F",
+        session_name="BSD",
+        gate="g0",
+        project="Inhibition-neural-information-processing",
     )
-
-    io.write(nwbfile)
-
-print("\nConversion complete!")
-print(f"NWB file saved to: {nwbfile_path}")
-
-# Verify the file
-from pynwb import read_nwb
-nwbfile = read_nwb(nwbfile_path)
-print(f"\nNWB file contains:")
-print(f"  - {len(nwbfile.units)} units")
-print(f"  - {len(nwbfile.trials)} trials")
