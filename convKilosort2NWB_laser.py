@@ -961,20 +961,24 @@ with NWBHDF5IO(nwbfile_path, 'r+') as io:
 # Convert expt_info to metadata dictionary (excluding trial_records)
 expt_metadata = expt_info_to_metadata(expt_info)
 
-# Open NWB file again to add trials and experiment metadata
+# Open NWB file again to add experiment metadata as a scratch entry.
+# NOTE: assigning to nwbfile.experiment_description on a file opened in 'r+'
+# is silently dropped by pynwb, so we store the JSON-serialized metadata in
+# /scratch instead, which is designed for arbitrary auxiliary data and works
+# correctly in append mode.
 with NWBHDF5IO(nwbfile_path, 'r+') as io:
     nwbfile = io.read()
-    
-    # Add experiment metadata to the NWB file
-    # Store as experiment_description or in a custom extension
+
     import json
     expt_metadata_str = json.dumps(expt_metadata, indent=2, default=str)
-    
-    # Update experiment description with metadata
-    existing_desc = nwbfile.experiment_description or ""
-    nwbfile.experiment_description = existing_desc + "\n\nExperiment Info:\n" + expt_metadata_str    
-    
-    # Save the modified file
+
+    nwbfile.add_scratch(
+        expt_metadata_str,
+        name='expt_info_json',
+        description='JSON-serialized experiment metadata from the session .mat '
+                    'file (excludes trial_records, which are in the trials table).'
+    )
+
     io.write(nwbfile)
 
 print("\nConversion complete!")
