@@ -61,9 +61,22 @@ MONKEY_INFO: dict[str, dict[str, str]] = {
 # One dict per session. `gate` is per-session because some recordings use
 # g0 and others g1. Order does not matter.
 SESSIONS: list[dict[str, str]] = [
-    {"date": "2024-01-15", "monkey": "MM005-Desta", "gate": "g0"},
-    # {"date": "2024-02-20", "monkey": "MM005-Desta", "gate": "g1"},
-    # {"date": "YYYY-MM-DD", "monkey": "MMxxx-Name",  "gate": "g0"},
+    {"date": "2024-07-03", "monkey": "MM001-Sansa", "gate": "g1"},
+    {"date": "2024-10-29", "monkey": "MM001-Sansa", "gate": "g1"},
+    {"date": "2024-10-31", "monkey": "MM001-Sansa", "gate": "g0"},
+    {"date": "2025-11-13", "monkey": "MM005-Desta", "gate": "g1"},
+    {"date": "2025-11-17", "monkey": "MM005-Desta", "gate": "g0"},
+    {"date": "2025-11-19", "monkey": "MM005-Desta", "gate": "g0"},
+    {"date": "2025-11-24", "monkey": "MM005-Desta", "gate": "g0"},
+    {"date": "2025-11-25", "monkey": "MM005-Desta", "gate": "g0"},
+    {"date": "2025-12-01", "monkey": "MM005-Desta", "gate": "g0"},
+    {"date": "2025-12-02", "monkey": "MM005-Desta", "gate": "g0"},
+    {"date": "2025-12-08", "monkey": "MM005-Desta", "gate": "g0"},
+    {"date": "2025-12-09", "monkey": "MM005-Desta", "gate": "g0"},
+    {"date": "2025-12-12", "monkey": "MM005-Desta", "gate": "g0"},
+    {"date": "2025-12-17", "monkey": "MM005-Desta", "gate": "g0"},
+    {"date": "2025-03-17", "monkey": "MM005-Desta", "gate": "g0"},
+    {"date": "2025-03-24", "monkey": "MM005-Desta", "gate": "g0"},
 ]
 
 # If True, overwrite existing .nwb files in NWB_DIR. If False, sessions
