@@ -1,26 +1,37 @@
 """
-Batch driver: re-run the Kilosort -> NWB conversion for every .nwb file
-already sitting in NWB_DIR, so that each file gets the fixes shipped in the
-current version of convKilosort2NWB_laser.py (notably the `expt_info_json`
-scratch entry, which was silently dropped by the old version).
+Batch driver: re-run the Kilosort -> NWB conversion for a hard-coded list
+of sessions (see SESSIONS below), so that each output .nwb file gets the
+fixes shipped in the current version of convKilosort2NWB_laser.py (notably
+the `expt_info_json` scratch entry, which was silently dropped by the old
+version).
 
 Assumptions
 -----------
-- Each old .nwb file name has the shape:
+- Output .nwb file names have the shape:
       {YYYY-MM-DD}-{MONKEY_NAME}-{PROJECT}.nwb
   where PROJECT is fixed (see PROJECT below) and MONKEY_NAME may contain
   hyphens (e.g. "MM005-Desta").
 - The raw source data (Kilosort output, SpikeGLX .ap/.nidq .bin/.meta, and
   the session .mat file) still live under DATA_ROOT following the layout
   hard-coded in convKilosort2NWB_laser.py.
-- SESSION_NAME and GATE are the same for every session (defaults 'BSD' /
-  'g0'); adjust below if that ever stops being true.
-- MONKEY_INFO is a per-monkey lookup for birthday (BD) and sex (SEX). The
-  starter dict below only covers MM005-Desta; add every other monkey you
-  have data for before running.
+- SESSION_NAME is the same for every session (default 'BSD'); the gate may
+  differ per session ('g0' or 'g1') and is specified per-entry in SESSIONS.
+- MONKEY_INFO is a per-monkey lookup for birthday (BD) and sex (SEX). Add
+  an entry for every monkey referenced in SESSIONS before running.
 
-The rewritten .nwb files are written back into NWB_DIR, overwriting the
-originals. Consider backing that folder up first.
+Output .nwb files are written into NWB_DIR. If OVERWRITE is True, existing
+files with the same name are replaced. Consider backing that folder up
+first.
+
+How to edit the session list
+----------------------------
+Each entry in SESSIONS is a dict with three keys:
+    "date"   : "YYYY-MM-DD"     session date
+    "monkey" : "MMxxx-Name"     must match a key in MONKEY_INFO
+    "gate"   : "g0" or "g1"     SpikeGLX gate index for this session
+
+Add / remove / edit lines freely; blank lines and `# ...` comments between
+entries are fine.
 """
 
 from __future__ import annotations
@@ -37,76 +48,65 @@ DATA_ROOT = "F:/localDATA/Electrophysiology"
 
 PROJECT = "Inhibition-neural-information-processing"
 SESSION_NAME = "BSD"
-GATE = "g0"
 SPECIES = "Callithrix jacchus"
 
 # Per-monkey static info: birthday (YYYY-MM-DD) and sex. Fill in every
-# monkey that appears in NWB_DIR before running.
+# monkey referenced in SESSIONS before running.
 MONKEY_INFO: dict[str, dict[str, str]] = {
-    "MM005-Desta": {"BD": "2021-04-23", "SEX": "F"},
-    # "MMxxx-Name": {"BD": "YYYY-MM-DD", "SEX": "M"},
+    "MM005-Desta": {"BD": "2021-04-22", "SEX": "F"},
+    "MM001-Sansa": {"BD": "2019-08-27", "SEX": "F"},
 }
 
+# ---- Sessions to re-analyze ----
+# One dict per session. `gate` is per-session because some recordings use
+# g0 and others g1. Order does not matter.
+SESSIONS: list[dict[str, str]] = [
+    {"date": "2024-01-15", "monkey": "MM005-Desta", "gate": "g0"},
+    # {"date": "2024-02-20", "monkey": "MM005-Desta", "gate": "g1"},
+    # {"date": "YYYY-MM-DD", "monkey": "MMxxx-Name",  "gate": "g0"},
+]
+
 # If True, overwrite existing .nwb files in NWB_DIR. If False, sessions
-# whose output already exists will be skipped.
+# whose output already exists will be skipped by convert_session().
 OVERWRITE = True
 # ============== END CONFIGURATION ==============
 
 
-def parse_nwb_filename(nwb_path: Path, project: str) -> tuple[str, str]:
-    """
-    Parse '{YYYY-MM-DD}-{MONKEY_NAME}-{PROJECT}.nwb' into (date_str, monkey_name).
-
-    Raises ValueError if the filename does not match the expected pattern.
-    """
-    stem = nwb_path.stem  # strip .nwb
-    project_suffix = "-" + project
-    if not stem.endswith(project_suffix):
-        raise ValueError(
-            f"Filename does not end with '-{project}': {nwb_path.name}"
-        )
-    stem_no_project = stem[: -len(project_suffix)]
-
-    # Date is the first 10 chars: YYYY-MM-DD
-    if len(stem_no_project) < 12 or stem_no_project[10] != "-":
-        raise ValueError(
-            f"Cannot find YYYY-MM-DD prefix in filename: {nwb_path.name}"
-        )
-    date_str = stem_no_project[:10]
-    monkey_name = stem_no_project[11:]
-
-    if not date_str or not monkey_name:
-        raise ValueError(
-            f"Empty date or monkey_name parsed from filename: {nwb_path.name}"
-        )
-    return date_str, monkey_name
+def _describe(session: dict[str, str]) -> str:
+    """Short human-readable label for log lines."""
+    return (
+        f"{session.get('date', '?')}-{session.get('monkey', '?')} "
+        f"[{session.get('gate', '?')}]"
+    )
 
 
 def main() -> None:
-    if not NWB_DIR.is_dir():
-        raise FileNotFoundError(f"NWB_DIR does not exist: {NWB_DIR}")
+    NWB_DIR.mkdir(parents=True, exist_ok=True)
 
-    nwb_files = sorted(NWB_DIR.glob("*.nwb"))
-    if not nwb_files:
-        print(f"No .nwb files found in {NWB_DIR}")
+    if not SESSIONS:
+        print("SESSIONS is empty; nothing to do.")
         return
 
-    print(f"Found {len(nwb_files)} .nwb file(s) in {NWB_DIR}\n")
+    print(f"Processing {len(SESSIONS)} session(s); output -> {NWB_DIR}\n")
 
     succeeded: list[Path] = []
-    skipped: list[tuple[Path, str]] = []
-    failed: list[tuple[Path, str]] = []
+    skipped: list[tuple[str, str]] = []
+    failed: list[tuple[str, str]] = []
 
-    for nwb_path in nwb_files:
-        print("=" * 72)
-        print(f"Session file: {nwb_path.name}")
+    for session in SESSIONS:
+        label = _describe(session)        
 
-        try:
-            date_str, monkey_name = parse_nwb_filename(nwb_path, PROJECT)
-        except ValueError as exc:
-            reason = f"filename parse error: {exc}"
+        date_str = session.get("date", "").strip()
+        monkey_name = session.get("monkey", "").strip()
+        gate = session.get("gate", "").strip()
+
+        missing = [k for k, v in (
+            ("date", date_str), ("monkey", monkey_name), ("gate", gate)
+        ) if not v]
+        if missing:
+            reason = f"missing required field(s): {', '.join(missing)}"
             print(f"  SKIP -- {reason}")
-            skipped.append((nwb_path, reason))
+            skipped.append((label, reason))
             continue
 
         info = MONKEY_INFO.get(monkey_name)
@@ -116,11 +116,11 @@ def main() -> None:
                 "add it to MONKEY_INFO and rerun"
             )
             print(f"  SKIP -- {reason}")
-            skipped.append((nwb_path, reason))
+            skipped.append((label, reason))
             continue
 
         print(
-            f"  monkey={monkey_name}  date={date_str}  "
+            f"  monkey={monkey_name}  date={date_str}  gate={gate}  "
             f"BD={info['BD']}  SEX={info['SEX']}"
         )
 
@@ -131,7 +131,7 @@ def main() -> None:
                 birthday_str=info["BD"],
                 sex=info["SEX"],
                 session_name=SESSION_NAME,
-                gate=GATE,
+                gate=gate,
                 project=PROJECT,
                 data_root=DATA_ROOT,
                 output_dir=str(NWB_DIR),
@@ -142,7 +142,7 @@ def main() -> None:
             reason = f"{type(exc).__name__}: {exc}"
             print(f"  FAIL -- {reason}")
             traceback.print_exc()
-            failed.append((nwb_path, reason))
+            failed.append((label, reason))
             continue
 
         print(f"  OK   -- wrote {out_path}")
@@ -157,12 +157,12 @@ def main() -> None:
 
     if skipped:
         print("\nSkipped:")
-        for p, r in skipped:
-            print(f"  - {p.name}: {r}")
+        for lbl, r in skipped:
+            print(f"  - {lbl}: {r}")
     if failed:
         print("\nFailed:")
-        for p, r in failed:
-            print(f"  - {p.name}: {r}")
+        for lbl, r in failed:
+            print(f"  - {lbl}: {r}")
 
 
 if __name__ == "__main__":
