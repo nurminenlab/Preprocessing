@@ -712,6 +712,150 @@ def get_unit_channels(kilosort_folder):
     return {}
 
 
+def _pad_true_runs(mask: np.ndarray, pad_before: int, pad_after: int) -> np.ndarray:
+    """Expand each contiguous True-run in a bool mask by pad_before / pad_after samples."""
+    if pad_before <= 0 and pad_after <= 0:
+        return mask.copy()
+    n = mask.size
+    out = mask.copy()
+    edges = np.diff(mask.astype(np.int8))
+    starts = (np.where(edges == 1)[0] + 1).tolist()
+    ends = (np.where(edges == -1)[0] + 1).tolist()  # exclusive
+    if mask[0]:
+        starts = [0] + starts
+    if mask[-1]:
+        ends = ends + [n]
+    for s, e in zip(starts, ends):
+        out[max(0, s - pad_before):min(n, e + pad_after)] = True
+    return out
+
+
+def _drop_short_valid_islands(bad_mask: np.ndarray, min_valid_samples: int) -> np.ndarray:
+    """Mark contiguous valid (False) runs shorter than min_valid_samples as bad."""
+    n = bad_mask.size
+    if n == 0 or min_valid_samples <= 1:
+        return bad_mask.copy()
+    valid = ~bad_mask
+    edges = np.diff(valid.astype(np.int8))
+    starts = (np.where(edges == 1)[0] + 1).tolist()
+    ends = (np.where(edges == -1)[0] + 1).tolist()
+    if valid[0]:
+        starts = [0] + starts
+    if valid[-1]:
+        ends = ends + [n]
+    out = bad_mask.copy()
+    for s, e in zip(starts, ends):
+        if (e - s) < min_valid_samples:
+            out[s:e] = True
+    return out
+
+
+def clean_pupil_blinks(
+    pupil: np.ndarray,
+    sampling_rate: float,
+    speed_mad_n: float = 16.0,
+    pad_before_ms: float = 50.0,
+    pad_after_ms: float = 150.0,
+    min_valid_ms: float = 20.0,
+    invalid_low_frac: float = 0.10,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Remove blink artifacts from a pupil-diameter trace and linearly interpolate.
+
+    Follows the standard pupillometry preprocessing recipe:
+
+    * Kret & Sjak-Shie (2019), Behav. Res. Methods 51:1336-1352 -- "speed
+      filter": per-sample dilation speed = max(|forward diff|, |backward diff|)
+      / dt; samples with speed > median + n * MAD (n=16 by default) are marked
+      as artifacts. MAD is used instead of SD because it is robust to the
+      blinks themselves.
+    * Mathot (2013) / Hershman et al. (2018) -- pad each blink run by
+      pad_before_ms / pad_after_ms because the eyelid partially occludes the
+      pupil around the blink core. Discard "recovered" islands shorter than
+      min_valid_ms since they are usually still corrupted.
+    * Signal-loss floor: full closures drive the analog eye-tracker channel
+      close to zero; anything at or below invalid_low_frac * median(positive
+      pupil) is flagged.
+    * Gaps are then linearly interpolated. Leading / trailing edge gaps stay
+      NaN (no extrapolation).
+
+    Parameters
+    ----------
+    pupil : np.ndarray
+        1-D pupil diameter samples.
+    sampling_rate : float
+        Sample rate of `pupil`, in Hz.
+    speed_mad_n, pad_before_ms, pad_after_ms, min_valid_ms, invalid_low_frac
+        Tuning knobs; defaults follow Kret & Sjak-Shie (2019) recommendations
+        adjusted for a slightly more conservative post-blink pad.
+
+    Returns
+    -------
+    cleaned : np.ndarray of float32
+        Blink-cleaned pupil trace, same length as input.
+    blink_mask : np.ndarray of bool
+        True where the sample was flagged as blink and interpolated (or set to
+        NaN at the edges).
+    """
+    pupil = np.asarray(pupil, dtype=np.float32).copy()
+    n = pupil.size
+    if n == 0:
+        return pupil, np.zeros(0, dtype=bool)
+
+    dt = 1.0 / float(sampling_rate)
+
+    # 1) Signal-loss floor (full-closure blinks)
+    positive = pupil[pupil > 0]
+    if positive.size:
+        low_thr = invalid_low_frac * np.median(positive)
+    else:
+        low_thr = 0.0
+    low_mask = pupil <= low_thr
+
+    # 2) Kret & Sjak-Shie dilation-speed filter
+    if n >= 2:
+        diffs = np.abs(np.diff(pupil)) / dt
+        speed = np.zeros(n, dtype=np.float32)
+        speed[:-1] = diffs
+        speed[1:] = np.maximum(speed[1:], diffs)  # max(forward, backward)
+
+        med_s = np.median(speed)
+        mad_s = np.median(np.abs(speed - med_s))
+        # If MAD collapses to 0 (flat regions dominate), fall back to std so
+        # the threshold is still meaningful.
+        scale = mad_s if mad_s > 0 else float(np.std(speed))
+        speed_thr = med_s + speed_mad_n * scale
+        speed_mask = speed > speed_thr
+    else:
+        speed_mask = np.zeros(n, dtype=bool)
+
+    bad_mask = low_mask | speed_mask
+
+    # 3) Discard tiny valid islands wedged inside blink clusters
+    min_valid_samples = max(1, int(round(min_valid_ms * 1e-3 * sampling_rate)))
+    bad_mask = _drop_short_valid_islands(bad_mask, min_valid_samples)
+
+    # 4) Pad artifact runs
+    pad_before = int(round(pad_before_ms * 1e-3 * sampling_rate))
+    pad_after = int(round(pad_after_ms * 1e-3 * sampling_rate))
+    bad_mask = _pad_true_runs(bad_mask, pad_before, pad_after)
+
+    # 5) Linear interpolation over interior gaps
+    good_idx = np.where(~bad_mask)[0]
+    cleaned = np.full(n, np.nan, dtype=np.float32)
+    if good_idx.size >= 2:
+        first, last = int(good_idx[0]), int(good_idx[-1])
+        interior = np.arange(first, last + 1)
+        cleaned[interior] = np.interp(
+            interior, good_idx, pupil[good_idx]
+        ).astype(np.float32)
+        # Preserve original values at good samples exactly
+        cleaned[good_idx] = pupil[good_idx]
+    elif good_idx.size == 1:
+        cleaned[good_idx[0]] = pupil[good_idx[0]]
+
+    return cleaned, bad_mask
+
 
 def convert_session(
     monkey_name: str,
@@ -978,9 +1122,105 @@ def convert_session(
         'laser_on': laser_on,
     })
 
+    # ---- Per-trial gaze traces (NIDAQ ch0 = x, ch1 = y) ----
+    # Raw voltage samples spanning [stim_onset, stim_onset + image_duration],
+    # sampled at nidaq_sampling_rate. Stored as ragged VectorData so trials
+    # that hit the end of the recording (and are zero-padded shorter) still
+    # round-trip cleanly.
+    gaze_x_ch = 0
+    gaze_y_ch = 1
+    n_gaze_samples = int(round(float(expt_info.image_duration) * nidaq_sampling_rate))
+    n_nidaq_samples = nidaq_data.shape[0]
+
+    gaze_x_traces = []
+    gaze_y_traces = []
+    for onset_idx in stim_onsets:
+        start = int(onset_idx)
+        end = min(start + n_gaze_samples, n_nidaq_samples)
+        gaze_x_traces.append(
+            np.asarray(nidaq_data[start:end, gaze_x_ch], dtype=np.int16)
+        )
+        gaze_y_traces.append(
+            np.asarray(nidaq_data[start:end, gaze_y_ch], dtype=np.int16)
+        )
+
+    gaze_description_suffix = (
+        f' Raw NIDAQ int16 samples starting at stimulus onset, spanning '
+        f'image_duration={float(expt_info.image_duration):.4f} s at '
+        f'{nidaq_sampling_rate:.2f} Hz ({n_gaze_samples} samples/trial nominal).'
+    )
+
+    # ---- Per-trial pupil-diameter traces (NIDAQ ch2), blink-cleaned ----
+    # Cleaning follows Kret & Sjak-Shie (2019, Behav. Res. Methods) speed-filter
+    # + Mathot (2013) style pad-and-interpolate. See clean_pupil_blinks() docstring.
+    pupil_ch = 2
+    pupil_raw_traces = []
+    pupil_clean_traces = []
+    pupil_blink_masks = []
+    for onset_idx in stim_onsets:
+        start = int(onset_idx)
+        end = min(start + n_gaze_samples, n_nidaq_samples)
+        raw = np.asarray(nidaq_data[start:end, pupil_ch], dtype=np.float32)
+        cleaned, blink_mask = clean_pupil_blinks(raw, nidaq_sampling_rate)
+        pupil_raw_traces.append(np.asarray(nidaq_data[start:end, pupil_ch], dtype=np.int16))
+        pupil_clean_traces.append(cleaned)
+        pupil_blink_masks.append(blink_mask)
+
+    pupil_description_suffix = (
+        f' NIDAQ channel {pupil_ch}, starting at stimulus onset, spanning '
+        f'image_duration={float(expt_info.image_duration):.4f} s at '
+        f'{nidaq_sampling_rate:.2f} Hz ({n_gaze_samples} samples/trial nominal).'
+    )
+
     with NWBHDF5IO(nwbfile_path, 'r+') as io:
         nwbfile = io.read()
         dataframe_to_nwb_trials(nwbfile, trials)
+        nwbfile.add_trial_column(
+            name='gaze_x',
+            description='Horizontal gaze trace from NIDAQ channel 0.'
+                        + gaze_description_suffix,
+            data=gaze_x_traces,
+            index=True,
+        )
+        nwbfile.add_trial_column(
+            name='gaze_y',
+            description='Vertical gaze trace from NIDAQ channel 1.'
+                        + gaze_description_suffix,
+            data=gaze_y_traces,
+            index=True,
+        )
+        nwbfile.add_trial_column(
+            name='pupil_diameter_raw',
+            description='Raw pupil-diameter trace (int16 NIDAQ counts) BEFORE '
+                        'blink cleaning, provided for QC.'
+                        + pupil_description_suffix,
+            data=pupil_raw_traces,
+            index=True,
+        )
+        nwbfile.add_trial_column(
+            name='pupil_diameter',
+            description='Blink-cleaned pupil-diameter trace (float32). Blinks '
+                        'detected via Kret & Sjak-Shie (2019) speed filter '
+                        '(median + 16*MAD of |d(pupil)/dt|) plus signal-loss '
+                        'floor; artifact runs padded by 50 ms before / 150 ms '
+                        'after (Mathot 2013 / Hershman et al. 2018); short '
+                        '(<20 ms) valid islands discarded; interior gaps '
+                        'linearly interpolated; edge gaps left as NaN. See '
+                        'pupil_blink_mask for which samples were '
+                        'interpolated.'
+                        + pupil_description_suffix,
+            data=pupil_clean_traces,
+            index=True,
+        )
+        nwbfile.add_trial_column(
+            name='pupil_blink_mask',
+            description='Boolean mask, True where the corresponding sample in '
+                        'pupil_diameter was flagged as blink/artifact and '
+                        'interpolated (or set to NaN at trial edges).'
+                        + pupil_description_suffix,
+            data=pupil_blink_masks,
+            index=True,
+        )
         io.write(nwbfile)
 
     # Store expt_info as a scratch entry (assigning to
